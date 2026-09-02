@@ -2,6 +2,7 @@
 """Provide functions to perform error-budgeting estimations."""
 
 from ._budget import get_error_budget
+from ._bounds import BoundsDiscoveryError, BoundsSearchResult, find_error_budget_bounds
 from ._discretisation import (
     DiscretisationStrategy,
     get_linear_points,
