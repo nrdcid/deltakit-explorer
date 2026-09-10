@@ -1,5 +1,4 @@
-"""Automatic exploration-bound discovery for error budgeting."""
-
+# (c) Copyright Riverlane 2020-2026. All rights reserved.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
@@ -38,6 +37,7 @@ def find_error_budget_bounds(
     noise_parameters: npt.NDArray[np.floating] | Sequence[float],
     num_rounds_per_distance: Mapping[int, Sequence[int]],
     *,
+    gradient_evaluation_point: npt.NDArray[np.floating] | Sequence[float] | None = None,
     sampling_parameters: SamplingParameters | None = None,
     parameter_indices: Sequence[int] | None = None,
     initial_relative_width: float = 0.1,
@@ -50,24 +50,37 @@ def find_error_budget_bounds(
     memory_generator: MemoryGenerator
     | Mapping[int, Mapping[int, Circuit]] = get_rotated_surface_code_memory_circuit,
 ) -> BoundsSearchResult:
-    """Find feasible axis-aligned exploration bounds around ``p / 2``.
+    """Return initial axis-aligned bounds around the gradient evaluation point.
 
-    This is the public API skeleton. The search and sampling implementation will be
-    added incrementally behind this stable interface.
+    ``gradient_evaluation_point`` gives the parameter values at which the gradient
+    will be evaluated and must have the same shape as ``noise_parameters``.
+    It defaults to ``noise_parameters / 2``. Pass ``noise_parameters`` to center
+    the bounds at ``p``, or a custom vector for any other evaluation point.
+    ``initial_relative_width`` is relative to the chosen evaluation point.
+
+    Search and sampling are not implemented yet; diagnostics are empty.
     """
-    del (
-        noise_model,
-        noise_parameters,
-        num_rounds_per_distance,
-        sampling_parameters,
-        parameter_indices,
-        initial_relative_width,
-        sensitivity_threshold,
-        logical_error_rate_min,
-        logical_error_rate_max,
-        max_iterations,
-        max_relative_width,
-        seed,
-        memory_generator,
+    parameters = np.asarray(noise_parameters)
+    centers = (
+        parameters / 2
+        if gradient_evaluation_point is None
+        else np.asarray(gradient_evaluation_point)
     )
-    raise NotImplementedError("automatic error-budget bounds are not implemented yet")
+    if centers.shape != parameters.shape:
+        msg = "gradient_evaluation_point must have the same shape as noise_parameters"
+        raise ValueError(msg)
+    return BoundsSearchResult(
+        bounds=tuple(
+            (
+                float(center * (1 - initial_relative_width)),
+                float(center * (1 + initial_relative_width)),
+            )
+            for center in centers
+        ),
+        stop_reasons=(),
+        endpoint_logical_error_estimates=(),
+        sensitivity_snrs=(),
+        shots_used=(),
+        insensitive=(),
+        failed_parameters=(),
+    )
