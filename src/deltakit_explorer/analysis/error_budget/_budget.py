@@ -14,6 +14,7 @@ from deltakit_explorer.analysis.error_budget._memory import (
     get_rotated_surface_code_memory_circuit,
 )
 from deltakit_explorer.analysis.error_budget._parameters import (
+    BoundSearchParameters,
     FittingParameters,
     SamplingParameters,
 )
@@ -64,6 +65,8 @@ def get_error_budget(
     sampling_parameters: SamplingParameters = SamplingParameters(),
     memory_generator: MemoryGenerator
     | Mapping[int, Mapping[int, Circuit]] = get_rotated_surface_code_memory_circuit,
+    *,
+    bound_search_parameters: BoundSearchParameters | None = None,
 ) -> ErrorBudgetResult:
     """Compute the error budget of the provided ``noise_model``.
 
@@ -98,12 +101,17 @@ def get_error_budget(
         memory_generator (MemoryGenerator): a callable that can generate a memory
             experiment. The resulting circuit will go through the provided
             ``noise_model`` for different values of the noise parameters.
+        bound_search_parameters: optional search configuration. When supplied,
+            its domain count is validated against ``noise_parameters``. Automatic
+            discovery is not enabled by this argument yet.
 
     Returns:
         the error-budgeting result, which consists of an array of contributions for each
         of the noise parameters of the provided ``noise_model`` along with their
         associated standard deviations.
     """
+    if bound_search_parameters is not None:
+        bound_search_parameters.validate_parameter_count(len(noise_parameters))
     # We will compute the gradient at the half point following the methodology outlined in
     # https://doi.org/10.1038/s41586-021-03588-y (Supplementary materials, Section VIII.C.).
     point = np.asarray(noise_parameters) / 2
