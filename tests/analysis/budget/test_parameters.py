@@ -21,7 +21,7 @@ def test_bound_search_defaults_and_required_domains():
     assert parameters.sensitivity_z_score == 3.0
     assert parameters.min_logical_failures == 10
     assert parameters.max_lep == 0.45
-    assert parameters.max_trials_per_parameter == 16
+    assert parameters.max_trials_per_param == 16
     assert {field.name for field in fields(parameters)} == {
         "parameter_domains",
         "initial_relative_half_width",
@@ -29,7 +29,7 @@ def test_bound_search_defaults_and_required_domains():
         "sensitivity_z_score",
         "min_logical_failures",
         "max_lep",
-        "max_trials_per_parameter",
+        "max_trials_per_param",
     }
 
 
@@ -67,10 +67,10 @@ def test_bound_search_accepts_valid_custom_values():
         sensitivity_z_score=0.1,
         min_logical_failures=np.int64(1),
         max_lep=0.499,
-        max_trials_per_parameter=1,
+        max_trials_per_param=1,
     )
     assert parameters.parameter_domains == ((-10.0, 10.0),)
-    assert parameters.max_trials_per_parameter == 1
+    assert parameters.max_trials_per_param == 1
 
 
 @pytest.mark.parametrize(
@@ -83,7 +83,7 @@ def test_bound_search_accepts_valid_custom_values():
             "sensitivity_z_score": [0, -1, np.nan, np.inf, -np.inf],
             "max_lep": [0, -1, 0.5, 1, np.nan, np.inf, -np.inf],
             "min_logical_failures": [0, -1, 1.5, True, np.nan, np.inf],
-            "max_trials_per_parameter": [0, -1, 1.5, True, np.nan, np.inf],
+            "max_trials_per_param": [0, -1, 1.5, True, np.nan, np.inf],
         }.items()
         for value in values
     ],
@@ -106,7 +106,7 @@ def test_public_entrypoints_reject_domain_count_before_work(entrypoint, domain_c
     }
     if entrypoint == "finder":
         function = find_error_budget_bounds
-        kwargs.update(num_rounds_per_distance={3: [3]}, search_parameters=config)
+        kwargs.update(num_rounds_by_distances={3: [3]}, search_parameters=config)
     else:
         function = get_error_budget
         kwargs.update(
