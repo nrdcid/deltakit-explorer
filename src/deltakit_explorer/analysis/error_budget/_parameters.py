@@ -1,7 +1,7 @@
 # (c) Copyright Riverlane 2020-2026. All rights reserved.
 from collections.abc import Sequence
 from dataclasses import dataclass
-from numbers import Integral
+from numbers import Integral, Real
 
 import numpy as np
 import numpy.typing as npt
@@ -9,6 +9,46 @@ import numpy.typing as npt
 from deltakit_explorer.analysis.error_budget._discretisation import (
     DiscretisationStrategy,
 )
+
+
+def _resolve_gradient_point(
+    noise_parameters: npt.NDArray[np.floating] | Sequence[float],
+    scale: float,
+) -> npt.NDArray[np.floating]:
+    """Validate calibration and scale, then resolve the gradient evaluation vector.
+
+    Args:
+        noise_parameters: Nonempty, finite one-dimensional calibration vector.
+        scale: Finite positive scalar multiplier.
+
+    Returns:
+        A new array containing the scaled calibration vector.
+
+    Raises:
+        ValueError: If calibration, scale, or the resulting vector is invalid.
+    """
+    if (
+        isinstance(scale, bool)
+        or not isinstance(scale, Real)
+        or not np.isfinite(scale)
+        or scale <= 0
+    ):
+        msg = "gradient_evaluation_scale must be a finite positive scalar."
+        raise ValueError(msg)
+    parameters = np.asarray(noise_parameters, dtype=float)
+    if (
+        parameters.ndim != 1
+        or parameters.size == 0
+        or not np.all(np.isfinite(parameters))
+    ):
+        msg = "noise_parameters must be a nonempty, finite one-dimensional vector."
+        raise ValueError(msg)
+    with np.errstate(over="ignore", under="ignore"):
+        point = parameters * scale
+    if not np.all(np.isfinite(point)):
+        msg = "gradient_evaluation_scale produces a non-finite evaluation point."
+        raise ValueError(msg)
+    return point
 
 
 @dataclass(frozen=True)
@@ -91,7 +131,7 @@ class BoundSearchParameters:
         sensitivity_z_score: Positive endpoint signal-to-noise threshold.
         min_logical_failures: Positive integer failure-count floor per experiment.
         max_lep: Logical error probability ceiling, strictly between zero and 0.5.
-        max_trials_per_parameter: Positive integer cap on new noncentral probes
+        max_trials_per_param: Positive integer cap on new noncentral probes
             for each parameter.
 
     Raises:
@@ -142,7 +182,7 @@ class BoundSearchParameters:
         if not np.isfinite(self.max_lep) or not 0 < self.max_lep < 0.5:
             msg = "max_lep must be finite and strictly between 0 and 0.5."
             raise ValueError(msg)
-        for name in ("min_logical_failures", "max_trials_per_parameter"):
+        for name in ("min_logical_failures", "max_trials_per_param"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
                 msg = f"{name} must be a positive integer."
