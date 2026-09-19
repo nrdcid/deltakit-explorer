@@ -105,7 +105,7 @@ class BoundSearchParameters:
     sensitivity_z_score: float = 3.0
     min_logical_failures: int = 10
     max_lep: float = 0.45
-    max_trials_per_parameter: int = 16
+    max_trials_per_param: int = 16
 
     def __post_init__(self) -> None:
         domain_error = (
