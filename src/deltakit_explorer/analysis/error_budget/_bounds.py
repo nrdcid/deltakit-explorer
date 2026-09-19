@@ -12,7 +12,10 @@ from deltakit_explorer.analysis.error_budget._memory import (
     MemoryGenerator,
     get_rotated_surface_code_memory_circuit,
 )
-from deltakit_explorer.analysis.error_budget._parameters import SamplingParameters
+from deltakit_explorer.analysis.error_budget._parameters import (
+    BoundSearchParameters,
+    SamplingParameters,
+)
 
 
 class BoundsDiscoveryError(RuntimeError):
@@ -37,6 +40,7 @@ def find_error_budget_bounds(
     noise_parameters: npt.NDArray[np.floating] | Sequence[float],
     num_rounds_per_distance: Mapping[int, Sequence[int]],
     *,
+    search_parameters: BoundSearchParameters | None = None,
     gradient_evaluation_point: npt.NDArray[np.floating] | Sequence[float] | None = None,
     sampling_parameters: SamplingParameters | None = None,
     parameter_indices: Sequence[int] | None = None,
@@ -58,9 +62,14 @@ def find_error_budget_bounds(
     the bounds at ``p``, or a custom vector for any other evaluation point.
     ``initial_relative_width`` is relative to the chosen evaluation point.
 
+    ``search_parameters``, when supplied, must contain one domain per calibration
+    parameter. It is currently used only for configuration validation.
+
     Search and sampling are not implemented yet; diagnostics are empty.
     """
     parameters = np.asarray(noise_parameters)
+    if search_parameters is not None:
+        search_parameters.validate_parameter_count(len(parameters))
     centers = (
         parameters / 2
         if gradient_evaluation_point is None
