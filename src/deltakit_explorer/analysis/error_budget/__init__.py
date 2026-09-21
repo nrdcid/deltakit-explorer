@@ -1,8 +1,17 @@
 # (c) Copyright Riverlane 2020-2026. All rights reserved.
 """Provide functions to perform error-budgeting estimations."""
 
-from ._bounds import BoundsDiscoveryError, BoundsSearchResult, find_error_budget_bounds
-from ._budget import get_error_budget
+from ._bounds import (
+    BoundsDiscoveryError,
+    BoundSearchStatus,
+    BoundSearchTimings,
+    BoundsSearchResult,
+    CircuitPilotObservation,
+    LambdaPilotObservation,
+    ParameterSearchDiagnostic,
+    find_error_budget_bounds,
+)
+from ._budget import ErrorBudgetResult, get_error_budget
 from ._discretisation import (
     DiscretisationStrategy,
     get_linear_points,

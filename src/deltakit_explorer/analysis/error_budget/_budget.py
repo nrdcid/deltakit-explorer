@@ -8,7 +8,11 @@ import numpy as np
 import numpy.typing as npt
 from deltakit_circuit._circuit import Circuit
 
-from deltakit_explorer.analysis.error_budget._bounds import find_error_budget_bounds
+from deltakit_explorer.analysis.error_budget._bounds import (
+    BoundsDiscoveryError,
+    BoundsSearchResult,
+    find_error_budget_bounds,
+)
 from deltakit_explorer.analysis.error_budget._gradient import inverse_lambda_gradient_at
 from deltakit_explorer.analysis.error_budget._memory import (
     MemoryGenerator,
@@ -29,10 +33,13 @@ class ErrorBudgetResult:
     Attributes:
         contributions: contributions for each of the noise parameters to the error budget.
         contribution_stddevs: estimation of the standard deviation of each of the ``contributions``.
+        bound_search_result: Discovery evidence for automatic bounds, or None when
+            explicit bounds were supplied.
     """
 
     contributions: tuple[float, ...]
     contribution_stddevs: tuple[float, ...]
+    bound_search_result: BoundsSearchResult | None = None
 
     @property
     def lambda_estimate(self) -> float:
@@ -77,8 +84,9 @@ def get_error_budget(
     """Compute the error budget of the provided ``noise_model``.
 
     Note:
-        Automatic mode currently uses the finder's initial, unvalidated intervals.
-        Statistical bound search and pilot sampling are not implemented yet.
+        Statistical bound search and pilot sampling are not implemented yet, so
+        automatic mode currently raises BoundsDiscoveryError with an unresolved
+        result. Explicit-bound budgeting remains available.
 
     Args:
         noise_model (Callable[[Circuit, npt.NDArray[np.floating]], Circuit]): a callable
@@ -129,11 +137,17 @@ def get_error_budget(
         the error-budgeting result, which consists of an array of contributions for each
         of the noise parameters of the provided ``noise_model`` along with their
         associated standard deviations.
+
+    Raises:
+        BoundsDiscoveryError: If discovery leaves any parameter unresolved. The
+            exception's result attribute contains the partial search result.
+        ValueError: If the calibration, scale, or search configuration is invalid.
     """
     parameters = np.asarray(noise_parameters)
     point = _resolve_gradient_point(parameters, gradient_evaluation_scale)
     if bound_search_parameters is not None:
         bound_search_parameters.validate_parameter_count(len(parameters))
+    search_result = None
     if noise_parameters_exploration_bounds is None:
         if bound_search_parameters is None:
             msg = "Automatic discovery requires bound_search_parameters with parameter domains."
@@ -151,7 +165,15 @@ def get_error_budget(
             enable_correlations=enable_correlations,
             seed=seed,
         )
-        noise_parameters_exploration_bounds = list(search_result.bounds)
+        if not search_result.success:
+            unresolved = [
+                i for i, bound in enumerate(search_result.bounds) if bound is None
+            ]
+            msg = f"Bound discovery is incomplete for parameter indices {unresolved}."
+            raise BoundsDiscoveryError(msg, result=search_result)
+        noise_parameters_exploration_bounds = [
+            bound for bound in search_result.bounds if bound is not None
+        ]
     # Evaluate the gradient.
     gradient, gradient_stddev = inverse_lambda_gradient_at(
         noise_model,
@@ -162,4 +184,6 @@ def get_error_budget(
         sampling_parameters,
         memory_generator,
     )
-    return ErrorBudgetResult.from_gradient(gradient, gradient_stddev, parameters)
+    result = ErrorBudgetResult.from_gradient(gradient, gradient_stddev, parameters)
+    result.bound_search_result = search_result
+    return result

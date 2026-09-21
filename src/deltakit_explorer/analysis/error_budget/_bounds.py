@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from numbers import Integral
+from time import perf_counter
 
 import numpy as np
 import numpy.typing as npt
+import pandas as pd
 from deltakit_circuit._circuit import Circuit
 
+from deltakit_explorer.analysis._binomial_fit import ConfidenceInterval
 from deltakit_explorer.analysis.error_budget._discretisation import (
     DiscretisationStrategy,
 )
@@ -24,21 +28,183 @@ from deltakit_explorer.analysis.error_budget._parameters import (
 )
 
 
-class BoundsDiscoveryError(RuntimeError):
-    """Raised when usable error-budget exploration bounds cannot be found."""
+class BoundSearchStatus(Enum):
+    """Termination status of one parameter's bound search."""
+
+    NOT_EVALUATED = auto()
+    CONVERGED = auto()
+    INSUFFICIENT_COUNTS = auto()
+    LOW_SNR = auto()
+    SATURATED = auto()
+    DOMAIN_LIMIT = auto()
+    TRIAL_LIMIT = auto()
+    INVALID_ESTIMATE = auto()
+    NON_MONOTONE = auto()
+
+
+@dataclass(frozen=True)
+class CircuitPilotObservation:
+    """Raw counts and logical-error probability for one pilot circuit.
+
+    Attributes:
+        distance: Code distance.
+        num_rounds: Number of memory-experiment rounds.
+        fails: Actual observed logical failures.
+        shots: Actual completed shots, including unsuccessful probes.
+        lep_interval: Binomial LEP estimate and bounds, if available.
+    """
+
+    distance: int
+    num_rounds: int
+    fails: int
+    shots: int
+    lep_interval: ConfidenceInterval | None = None
+
+
+@dataclass(frozen=True)
+class LambdaPilotObservation:
+    """Observation at one exact noise vector, including failed probes.
+
+    Attributes:
+        point_id: Stable identifier within this discovery run.
+        noise_parameters: Full noise vector, preserving distinct nearby points.
+        circuits: Per-circuit counts and LEP intervals.
+        lambda_estimate: Valid Lambda estimate, or None when unavailable/invalid.
+        lambda_stddev: Standard deviation of Lambda, if valid.
+        inverse_lambda_estimate: Valid inverse-Lambda estimate, if available.
+        inverse_lambda_stddev: Standard deviation of inverse Lambda, if valid.
+        warnings: Estimator warnings retained without discarding raw evidence.
+        invalidity_reasons: Reasons this point cannot support a valid estimate.
+    """
+
+    point_id: int
+    noise_parameters: tuple[float, ...]
+    circuits: tuple[CircuitPilotObservation, ...]
+    lambda_estimate: float | None = None
+    lambda_stddev: float | None = None
+    inverse_lambda_estimate: float | None = None
+    inverse_lambda_stddev: float | None = None
+    warnings: tuple[str, ...] = ()
+    invalidity_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ParameterSearchDiagnostic:
+    """Outcome and evidence for one axis search.
+
+    Attributes:
+        parameter_index: Coordinate being varied.
+        status: Search termination status.
+        candidate_interval: Last proposed interval, even when unresolved.
+        trial_count: Actual noncentral trials performed for this parameter.
+        endpoint_snr: Endpoint inverse-Lambda signal-to-noise ratio, if available.
+        min_failures: Minimum observed failure count across endpoint circuits.
+        max_lep: Maximum observed endpoint logical-error probability.
+        reason: Explanation of the outcome or missing evidence.
+    """
+
+    parameter_index: int
+    status: BoundSearchStatus
+    candidate_interval: tuple[float, float] | None = None
+    trial_count: int = 0
+    endpoint_snr: float | None = None
+    min_failures: int | None = None
+    max_lep: float | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class BoundSearchTimings:
+    """Measured discovery durations in seconds; never runtime deadlines.
+
+    Attributes:
+        construction_seconds: Circuit and decoder construction time.
+        sampling_seconds: Combined sampling and decoding time.
+        post_processing_seconds: Statistical post-processing time.
+        total_seconds: Total elapsed time, including setup and orchestration.
+    """
+
+    construction_seconds: float = 0.0
+    sampling_seconds: float = 0.0
+    post_processing_seconds: float = 0.0
+    total_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
 class BoundsSearchResult:
-    """Diagnostics and bounds returned by automatic bounds discovery."""
+    """Validated bounds and retained evidence from a possibly incomplete search.
 
-    bounds: tuple[tuple[float, float], ...]
-    stop_reasons: tuple[str, ...]
-    endpoint_logical_error_estimates: tuple[tuple[float, float], ...]
-    sensitivity_snrs: tuple[float, ...]
-    shots_used: tuple[int, ...]
-    insensitive: tuple[bool, ...]
-    failed_parameters: tuple[int, ...]
+    Attributes:
+        bounds: One validated interval per coordinate; None for unresolved axes.
+            Unvalidated candidate intervals belong only in diagnostics.
+        evaluation_point: Full gradient evaluation vector.
+        gradient_evaluation_scale: Multiplier used to resolve the evaluation point.
+        diagnostics: Per-parameter search outcomes in coordinate order.
+        pilot_data: Raw sampler report rows, including failed probes.
+        observations: One observation per unique sampled noise vector. Repeated
+            cached lookups do not add observations or contribute to totals.
+        phase_timings: Measured phase and total discovery durations.
+
+    Raises:
+        ValueError: If bounds do not match the evaluation vector or a resolved
+            interval is non-finite or does not strictly contain its coordinate.
+    """
+
+    bounds: tuple[tuple[float, float] | None, ...]
+    evaluation_point: tuple[float, ...]
+    gradient_evaluation_scale: float
+    diagnostics: tuple[ParameterSearchDiagnostic, ...]
+    pilot_data: pd.DataFrame = field(default_factory=pd.DataFrame)
+    observations: tuple[LambdaPilotObservation, ...] = ()
+    phase_timings: BoundSearchTimings = field(default_factory=BoundSearchTimings)
+
+    def __post_init__(self) -> None:
+        if not self.bounds or len(self.bounds) != len(self.evaluation_point):
+            msg = "bounds must contain one entry per nonempty evaluation coordinate."
+            raise ValueError(msg)
+        for bound, center in zip(self.bounds, self.evaluation_point, strict=True):
+            if bound is not None and (
+                len(bound) != 2
+                or not np.all(np.isfinite(bound))
+                or not bound[0] < center < bound[1]
+            ):
+                msg = "Resolved bounds must be finite and strictly contain the evaluation point."
+                raise ValueError(msg)
+
+    @property
+    def success(self) -> bool:
+        """Whether every parameter has a validated interval."""
+        return all(bound is not None for bound in self.bounds)
+
+    @property
+    def total_trials(self) -> int:
+        """Actual unique sampled vectors, including the center and failed probes."""
+        return len(self.observations)
+
+    @property
+    def total_shots(self) -> int:
+        """Actual shots across all pilot circuits, including failed probes."""
+        return sum(
+            circuit.shots for point in self.observations for circuit in point.circuits
+        )
+
+
+class BoundsDiscoveryError(RuntimeError):
+    """Discovery failure retaining its partial result for inspection.
+
+    Attributes:
+        result: Partial discovery result, when one was produced.
+    """
+
+    def __init__(self, message: str, result: BoundsSearchResult | None = None) -> None:
+        """Create an error with the discovery evidence available at failure.
+
+        Args:
+            message: Explanation of the failure.
+            result: Partial result, if discovery produced one.
+        """
+        super().__init__(message)
+        self.result = result
 
 
 # Sampling-related arguments are reserved for the simulation adapter implementation.
@@ -57,10 +223,10 @@ def find_error_budget_bounds(
     enable_correlations: bool = False,  # noqa: ARG001
     seed: int | None = None,  # noqa: ARG001
 ) -> BoundsSearchResult:
-    """Validate discovery inputs and return initial, unvalidated search intervals.
+    """Validate discovery inputs and return an unresolved search result.
 
-    Search and sampling are not implemented yet. Returned intervals have not been
-    screened for feasibility or sensitivity; diagnostics remain empty.
+    Search and sampling are not implemented yet. Initial candidate intervals are
+    retained in diagnostics; all bounds are unresolved until sampling validates them.
 
     Args:
         noise_model: Callable adding noise to a circuit using the supplied vector.
@@ -85,12 +251,13 @@ def find_error_budget_bounds(
         seed: Optional seed for the future sampler.
 
     Returns:
-        Initial intervals with empty diagnostics. These are not discovered bounds.
+        A partial result with unresolved bounds and unsampled candidate diagnostics.
 
     Raises:
         ValueError: If calibration, scale, shot/execution settings, domains, or
             initial intervals are invalid or incompatible with the fit strategy.
     """
+    started = perf_counter()
     centers = _resolve_gradient_point(noise_parameters, gradient_evaluation_scale)
     search_parameters.validate_parameter_count(len(centers))
     for name, value in (
@@ -129,14 +296,19 @@ def find_error_budget_bounds(
         msg = "Initial intervals cannot strictly contain the evaluation point; supply explicit bounds."
         raise ValueError(msg)
 
+    diagnostics = tuple(
+        ParameterSearchDiagnostic(
+            parameter_index=i,
+            status=BoundSearchStatus.NOT_EVALUATED,
+            candidate_interval=(float(lo), float(hi)),
+            reason="Statistical search and pilot sampling are not implemented yet.",
+        )
+        for i, (lo, hi) in enumerate(zip(lower, upper, strict=True))
+    )
     return BoundsSearchResult(
-        bounds=tuple(
-            (float(lo), float(hi)) for lo, hi in zip(lower, upper, strict=True)
-        ),
-        stop_reasons=(),
-        endpoint_logical_error_estimates=(),
-        sensitivity_snrs=(),
-        shots_used=(),
-        insensitive=(),
-        failed_parameters=(),
+        bounds=(None,) * len(centers),
+        evaluation_point=tuple(map(float, centers)),
+        gradient_evaluation_scale=float(gradient_evaluation_scale),
+        diagnostics=diagnostics,
+        phase_timings=BoundSearchTimings(total_seconds=perf_counter() - started),
     )
