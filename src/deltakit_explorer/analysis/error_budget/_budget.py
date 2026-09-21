@@ -8,6 +8,7 @@ import numpy as np
 import numpy.typing as npt
 from deltakit_circuit._circuit import Circuit
 
+from deltakit_explorer.analysis.error_budget._bounds import find_error_budget_bounds
 from deltakit_explorer.analysis.error_budget._gradient import inverse_lambda_gradient_at
 from deltakit_explorer.analysis.error_budget._memory import (
     MemoryGenerator,
@@ -17,6 +18,7 @@ from deltakit_explorer.analysis.error_budget._parameters import (
     BoundSearchParameters,
     FittingParameters,
     SamplingParameters,
+    _resolve_gradient_point,
 )
 
 
@@ -60,34 +62,44 @@ def get_error_budget(
     noise_model: Callable[[Circuit, npt.NDArray[np.floating]], Circuit],
     noise_parameters: npt.NDArray[np.floating] | Sequence[float],
     num_rounds_by_distances: Mapping[int, Sequence[int]],
-    noise_parameters_exploration_bounds: list[tuple[float, float]],
+    noise_parameters_exploration_bounds: list[tuple[float, float]] | None = None,
     fitting_parameters: FittingParameters = FittingParameters(),
     sampling_parameters: SamplingParameters = SamplingParameters(),
     memory_generator: MemoryGenerator
     | Mapping[int, Mapping[int, Circuit]] = get_rotated_surface_code_memory_circuit,
     *,
+    gradient_evaluation_scale: float = 0.5,
     bound_search_parameters: BoundSearchParameters | None = None,
+    bound_search_shots_per_trial: int = 10_000,
+    enable_correlations: bool = False,
+    seed: int | None = None,
 ) -> ErrorBudgetResult:
     """Compute the error budget of the provided ``noise_model``.
+
+    Note:
+        Automatic mode currently uses the finder's initial, unvalidated intervals.
+        Statistical bound search and pilot sampling are not implemented yet.
 
     Args:
         noise_model (Callable[[Circuit, npt.NDArray[np.floating]], Circuit]): a callable
             adding noise to the provided circuit, according to the parameters provided.
         noise_parameters (npt.NDArray[numpy.floating] | Sequence[float]): valid
-            parameters to forward to ``noise_model`` representing the point at which the
-            gradient should be computed.
+            calibrated parameters to forward to ``noise_model``. The gradient is
+            evaluated at ``gradient_evaluation_scale * noise_parameters`` and the
+            contributions are weighted by the original calibrated parameters.
         num_rounds_by_distances (Mapping[int, Sequence[int]]): a mapping from each code
             distance that should be tested to the number of rounds that should be
             sampled in order to estimate the logical error-probability per round, to
             ultimately get 1 / Λ.
-        noise_parameters_exploration_bounds (list[tuple[float, float]]): ``(min, max)``
-            bounds for each noise parameter of the provided ``noise_model``. A degree
+        noise_parameters_exploration_bounds: ``(min, max)`` bounds for each noise
+            parameter, or ``None`` to invoke discovery. Explicit bounds bypass
+            discovery. A degree
             ``fitting_degree`` polynomial will be fitted on the interval ``[min, max]``.
-            The corresponding noise parameter from the provided ``noise_model`` should
+            The corresponding scaled evaluation coordinate should
             be strictly contained in ``[min, max]`` (i.e., for any valid ``i``, the
             following is true:
             ``noise_parameters_exploration_bounds[i][0] <
-            noise_model.noise_parameters[i] <
+            gradient_evaluation_scale * noise_parameters[i] <
             noise_parameters_exploration_bounds[i][1]``). Ideally, the lower (resp.
             upper) bound provided must be such that the logical error probability when
             replacing the parameter with its lower (resp. upper) bound is above
@@ -101,20 +113,45 @@ def get_error_budget(
         memory_generator (MemoryGenerator): a callable that can generate a memory
             experiment. The resulting circuit will go through the provided
             ``noise_model`` for different values of the noise parameters.
-        bound_search_parameters: optional search configuration. When supplied,
-            its domain count is validated against ``noise_parameters``. Automatic
-            discovery is not enabled by this argument yet.
+        gradient_evaluation_scale: finite positive scalar multiplying the calibration
+            vector to select the gradient point. Defaults to 0.5.
+        bound_search_parameters: search configuration with parameter domains,
+            required when exploration bounds are ``None``. When supplied, its
+            domain count is validated against the calibration vector.
+        bound_search_shots_per_trial: pilot shots per distance/round circuit at each
+            probed vector, forwarded to discovery separately from production shots.
+        enable_correlations: correlation setting forwarded to discovery. Reserved
+            for its future sampling adapter; production decoding is unchanged.
+        seed: seed forwarded to discovery. Reserved for its future sampling
+            adapter; this does not currently seed production sampling.
 
     Returns:
         the error-budgeting result, which consists of an array of contributions for each
         of the noise parameters of the provided ``noise_model`` along with their
         associated standard deviations.
     """
+    parameters = np.asarray(noise_parameters)
+    point = _resolve_gradient_point(parameters, gradient_evaluation_scale)
     if bound_search_parameters is not None:
-        bound_search_parameters.validate_parameter_count(len(noise_parameters))
-    # We will compute the gradient at the half point following the methodology outlined in
-    # https://doi.org/10.1038/s41586-021-03588-y (Supplementary materials, Section VIII.C.).
-    point = np.asarray(noise_parameters) / 2
+        bound_search_parameters.validate_parameter_count(len(parameters))
+    if noise_parameters_exploration_bounds is None:
+        if bound_search_parameters is None:
+            msg = "Automatic discovery requires bound_search_parameters with parameter domains."
+            raise ValueError(msg)
+        search_result = find_error_budget_bounds(
+            noise_model,
+            parameters,
+            num_rounds_by_distances,
+            search_parameters=bound_search_parameters,
+            gradient_evaluation_scale=gradient_evaluation_scale,
+            shots_per_trial=bound_search_shots_per_trial,
+            fitting_parameters=fitting_parameters,
+            sampling_parameters=sampling_parameters,
+            memory_generator=memory_generator,
+            enable_correlations=enable_correlations,
+            seed=seed,
+        )
+        noise_parameters_exploration_bounds = list(search_result.bounds)
     # Evaluate the gradient.
     gradient, gradient_stddev = inverse_lambda_gradient_at(
         noise_model,
@@ -125,6 +162,4 @@ def get_error_budget(
         sampling_parameters,
         memory_generator,
     )
-    return ErrorBudgetResult.from_gradient(
-        gradient, gradient_stddev, np.asarray(noise_parameters)
-    )
+    return ErrorBudgetResult.from_gradient(gradient, gradient_stddev, parameters)
